@@ -26,7 +26,7 @@ function create_x(x_folder,imsize,bn,bs,n,atype,epoch)
 		end
 			cur_im = permutedims(cur_im,[2 3 1])
 
-    x[:,:,:,im] = cur_im
+    x[:,:,:,im] = round(cur_im.*255)
 		im=im+1
 	end
 	x = convert(atype,x)
@@ -130,6 +130,17 @@ function weights(atype)
     w[32] = zeros(20,1)
     return map(a->convert(atype,a), w)
 end
+
+function weightsRPN
+	w[1] = 0.1.*randn(3,3,384,256)
+    w[2] = zeros(1,1,256,1)
+    w[3] = 0.1.*randn(1,1,256,18)
+    w[4] = zeros(1,1,18,1)
+    w[5] = 0.1.*randn(1,1,256,26)
+    w[6] = zeros(1,1,36,1)
+    
+end
+
 
 # function initprms(w)
 # 	prms = Array(Any,length(w))
