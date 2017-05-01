@@ -248,9 +248,9 @@ function forward_rpn(w,x)
     return (cls,bbox)
 end
 
-lr = 0.1
-epochs = 10
-perc = 0.01
+
+epochs = 50
+perc = 0.01 # percentage of the data to use
 global imsize = 500
 #global batchsize = 256
 #global fg_fraction = 0.5
@@ -272,6 +272,12 @@ anchors = read(file,"a")
 # for loop here
 w = weights_rpn()
 for epoch = 1:epochs
+  if epoch < 10
+    lr = 0.01
+  else
+    lr = 0.001
+  end
+
   lss = 0
   for ind_im = 1:Int(round(length(label_list)*perc))
     @printf "%d " round(length(label_list)*perc)-ind_im
