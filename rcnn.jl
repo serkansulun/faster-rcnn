@@ -1,195 +1,49 @@
-using Images, Knet, ArgParse
+using Images, Knet, MAT, ImageMagick
 
+function loss(w,im,label_gold,bbox_gold)
+    lambda = 4
+    (label_pred,bbox_pred) = forward_rpn(w,im)
+    label_gold_vec = mat(label_gold)
+    label_pred_vec = mat(label_pred)
+    bbox_pred_vec = mat(bbox_pred)
+    bbox_gold_vec = mat(bbox_gold)
+    label_norm_vec = logp(label_pred_vec,1)
+    # Log loss for labels
+    loss_label=-sum(label_gold_vec .* label_norm_vec) / size(label_norm_vec,1)
+    # Smooth L1 loss for bboxes
+    diff = abs(bbox_gold_vec-bbox_pred_vec)
+    #diff = convert(Array{Float32},diff)
 
-function create_x(x_folder,imsize,bn,bs,n,atype,epoch)
-	x = zeros(Float32,imsize,imsize,3,bs)
-	image_list = readdir(x_folder)
-	image_list = image_list[1:n]
-	rng = srand(epoch)
-	shuffle!(rng,image_list)
-	if ceil(length(image_list)/bs) == bn
-		last_idx = length(image_list)
-	else
-		last_idx = bn*bs
-	end
-	im=1
+    smoothL1 = zeros(size(diff,1),1)
+    smoothL1 = convert(atype,smoothL1)
 
-	for i=(bn-1)*bs+1:last_idx
-		cur_im = load(string(x_folder,image_list[i]))
-		cur_im = convert(Array{Float32},channelview(cur_im))
-		if ndims(cur_im)==2
-			tmp = zeros(3,size(cur_im,1),size(cur_im,2))
-			tmp[1,:,:] = cur_im
-			tmp[2,:,:] = cur_im
-			tmp[3,:,:] = cur_im
-			cur_im = tmp
-		end
-			cur_im = permutedims(cur_im,[2 3 1])
+    smoothL1 += 0.5.*diff.*diff.*(diff.<1)
+    smoothL1 += (diff .- 0.5).*(diff.>=1)
 
-    x[:,:,:,im] = round(cur_im.*255)
-		im=im+1
-	end
-	x = convert(atype,x)
-	return x
-end
-
-function create_dictionary(y_folder)
-	label_list = readdir(y_folder)
-	vocab = Dict{String,Int}()
-	idx = 1
-	for i=1:length(label_list)
-		f = open(string(y_folder,label_list[i]));
-		for ln in eachline(f)
-			if !haskey(vocab,ln[1:end-1])
-				vocab[ln[1:end-1]]=idx
-				idx += 1
-			end
-		end
-		close(f)
-	end
-	return vocab, length(label_list)
-end
-
-function create_y(y_folder,vocab,bn,bs,n,atype,epoch)
-	label_list = readdir(y_folder)
-	label_list = label_list[1:n]
-	rng = srand(epoch)
-	shuffle!(rng,label_list)
-	y = zeros(length(vocab),bs)
-	if ceil(length(label_list)/bs) == bn
-		last_idx = length(label_list)
-	else
-		last_idx = bn*bs
-	end
-	lab = 1
-
-	for i=(bn-1)*bs+1:last_idx
-		f = open(string(y_folder,label_list[i]));
-
-		for ln in eachline(f)
-			y[vocab[ln[1:end-1]],lab]=1
-		end
-		lab=lab+1
-		close(f)
-	end
-	y = convert(atype,y)
-	return y
-end
-
-function xavier(a...)
-    w = rand(a...)
-     # The old implementation was not right for fully connected layers:
-     # (fanin = length(y) / (size(y)[end]); scale = sqrt(3 / fanin); axpb!(rand!(y); a=2*scale, b=-scale)) :
-    if ndims(w) < 2
-        error("ndims=$(ndims(w)) in 0.1.*randn")
-    elseif ndims(w) == 2
-        fanout = size(w,1)
-        fanin = size(w,2)
-    else
-        fanout = size(w, ndims(w)) # Caffe disagrees: http://caffe.berkeleyvision.org/doxygen/classcaffe_1_1XavierFiller.html#details
-        fanin = div(length(w), fanout)
+    # We only calculate bbox loss for positive labels so first create a labels
+    # matrix as the same size as bbox, in order to multiply
+    label_mult = zeros(Float32,size(bbox_pred))
+    label_gold_f = convert(Array{Float32},label_gold)
+    # repmat doesn't work in 3rd dimension so use a for loop
+    for i=1:4
+      label_mult[:,:,9*(i-1)+1:9*i,:] = label_gold_f
     end
-    # See: http://jmlr.org/proceedings/papers/v9/glorot10a/glorot10a.pdf
-    s = sqrt(2 / (fanin + fanout))
-    w = 2s*w-s
-end
 
-function weights(atype)
-    w = Array(Any,32)
-    w[1] = 0.01.*randn(3,3,3,64)
-    w[2] = zeros(1,1,64,1)
-    w[3] = 0.01.*randn(3,3,64,64)
-    w[4] = zeros(1,1,64,1)
-    w[5] = 0.01.*randn(3,3,64,128)
-    w[6] = zeros(1,1,128,1)
-    w[7] = 0.01.*randn(3,3,128,128)
-    w[8] = zeros(1,1,128,1)
-    w[9] = 0.01.*randn(3,3,128,256)
-    w[10] = zeros(1,1,256,1)
-    w[11] = 0.01.*randn(3,3,256,256)
-    w[12] = zeros(1,1,256,1)
-    w[13] = 0.01.*randn(3,3,256,256)
-    w[14] = zeros(1,1,256,1)
-    w[15] = 0.01.*randn(3,3,256,512)
-    w[16] = zeros(1,1,512,1)
-    w[17] = 0.01.*randn(3,3,512,512)
-    w[18] = zeros(1,1,512,1)
-    w[19] = 0.01.*randn(3,3,512,512)
-    w[20] = zeros(1,1,512,1)
-    w[21] = 0.01.*randn(3,3,512,512)
-    w[22] = zeros(1,1,512,1)
-    w[23] = 0.01.*randn(3,3,512,512)
-    w[24] = zeros(1,1,512,1)
-    w[25] = 0.01.*randn(3,3,512,512)
-    w[26] = zeros(1,1,512,1)
-    w[27] = 0.01.*randn(4096,7*7*512)
-    w[28] = zeros(4096,1)
-    w[29] = 0.01.*randn(4096,4096)
-    w[30] = zeros(4096,1)
-    w[31] = 0.01.*randn(20,4096)
-    w[32] = zeros(20,1)
-    return map(a->convert(atype,a), w)
-end
+    label_mult_vec = convert(atype,mat(label_mult))
+    loss_bbox = -sum(label_mult_vec.*smoothL1) / size(smoothL1,1)
 
-function weightsRPN
-	w[1] = 0.1.*randn(3,3,384,256)
-    w[2] = zeros(1,1,256,1)
-    w[3] = 0.1.*randn(1,1,256,18)
-    w[4] = zeros(1,1,18,1)
-    w[5] = 0.1.*randn(1,1,256,26)
-    w[6] = zeros(1,1,36,1)
-    
-end
+    lss = loss_label + lambda*loss_bbox
 
-
-# function initprms(w)
-# 	prms = Array(Any,length(w))
-# 	for i=1:length(w)
-# 		prms[i] = Adam()
-# 	end
-# 	return prms
-# end
-
-function predict(w,x)
-
-    x = relu(conv4(w[1],x;padding=1) .+ w[2])
-  	x = relu(conv4(w[3],x;padding=1) .+ w[4])
-		x = pool(x)
-		x = relu(conv4(w[5],x;padding=1) .+ w[6])
-  	x = relu(conv4(w[7],x;padding=1) .+ w[8])
-		x = pool(x)
-		x = relu(conv4(w[9],x;padding=1) .+ w[10])
-  	x = relu(conv4(w[11],x;padding=1) .+ w[12])
-		x = relu(conv4(w[13],x;padding=1) .+ w[14])
-		x = pool(x)
-		x = relu(conv4(w[15],x;padding=1) .+ w[16])
-		x = relu(conv4(w[17],x;padding=1) .+ w[18])
-		x = relu(conv4(w[19],x;padding=1) .+ w[20])
-		x = pool(x)
-		x = relu(conv4(w[21],x;padding=1) .+ w[22])
-		x = relu(conv4(w[23],x;padding=1) .+ w[24])
-		x = relu(conv4(w[25],x;padding=1) .+ w[26])
-		x = pool(x)
-
-    x = mat(x)
-		x = relu(w[27]*x .+ w[28])
-		x = relu(w[29]*x .+ w[30])
-		x = relu(w[31]*x .+ w[32])
-
-    return x
-end
-
-function loss(w,x,ygold)
-    ypred = predict(w,x)
-    ynorm =  ypred .- log(sum(exp(ypred),1)) #logp(ypred,1)  #
-    return -sum(ygold .* ynorm) / size(ygold,2)
 end
 
 lossgradient = grad(loss)
 
-function train(w, x, y, lr)#; iters=1800)
-            g = lossgradient(w, x, y)
+function train(w, im, label_gold, bbox_gold,lr)#; iters=1800)
+
+            g = lossgradient(w, im, label_gold, bbox_gold)
+
             for i in 1:length(w)
+
                 #w[i] -= lr * g[i]
                 axpy!(-lr, g[i], w[i])
 								#update!(w[i],g[i],prms[i])
@@ -200,94 +54,234 @@ function train(w, x, y, lr)#; iters=1800)
     return w
 end
 
-function accuracy(w,x,y,threshold)
+function prepare_roi(anchors,gt_box,gt_label)
+  # Calculate overlaps between anchor and gt boxes
+  overlap = boxoverlap(anchors,gt_box)
+  (anc_max_overlaps, anc_assignment) = mymax(overlap, 1);
+  (gt_max_overlaps, gt_assignment) = mymax(overlap, 2);
+  # find all anchors with max_gt_overlap
+  matching=overlap.==gt_max_overlaps'
+  matchall = falses(size(matching,1),1)
+  for i = 1:size(matching,2)
+   matchall = matchall | matching[:,i]
+  end
+  gt_best_match = find(matchall)  # foreground and background indices
+  fg_inds = unique([find(anc_max_overlaps.>=0.7);gt_best_match])
+  #bg_inds = find(anc_max_overlaps.<0.3)
+  # drop background indices outside the image
+  #bg_inds = intersect(bg_inds,find(!outside_image(anchors)))
+  target_box = gt_box[anc_assignment[fg_inds], :]
+  anc_box = anchors[fg_inds, :]
+  regression_label = rcnn_bbox_transform(anc_box, target_box);
+  bbox_targets = zeros(size(anchors, 1), 4);
+  labels = zeros(size(anchors, 1))
+  #labels[fg_inds] = gt_label[anc_assignment[fg_inds]]
+  labels[fg_inds] = 1
+  #labels[bg_inds] = -1
+  bbox_targets[fg_inds, :] = regression_label
+  label_rs = reshape(labels,32,32,9,1)
+  bbox_rs = reshape(bbox_targets,32,32,9*4,1)
 
-      ypred = predict(w,x)
-      ncorrect = sum(y .* (ypred .> threshold))
-      nobj = sum(y)
-			ninstance = size(y,2)
-      nloss = -sum(y.*logp(ypred,1))
+  return (convert(atype,label_rs),convert(atype,bbox_rs))
+  #return (label_rs,bbox_rs)
 
-    return (nloss/ninstance,ncorrect/nobj)
 end
 
-function main(args=ARGS)
-	s = ArgParseSettings()
-    s.description="FASTER RCNN"
-    s.exc_handler=ArgParse.debug_handler
-    @add_arg_table s begin
-        ("--bs"; arg_type=Int; default=10; help="minibatch size")
-				("--threshold"; arg_type=Float64; default=0.5; help="threshold")
-				("--samplesize"; arg_type=Int; default=0; help="sample size")
-        ("--lr"; arg_type=Float64; default=0.1; help="learning rate")
-        ("--epochs"; arg_type=Int; default=30; help="number of epochs for training")
-        ("--gcheck"; arg_type=Int; default=0; help="check N random gradients per parameter")
+function rcnn_bbox_transform(anc_boxes,gt_boxes)
+  anc_widths = anc_boxes[:, 3] - anc_boxes[:, 1] + 1;
+  anc_heights = anc_boxes[:, 4] - anc_boxes[:, 2] + 1;
+  anc_ctr_x = anc_boxes[:, 1] .+ 0.5 .* (anc_widths - 1);
+  anc_ctr_y = anc_boxes[:, 2] .+ 0.5 .* (anc_heights - 1);
+
+  gt_widths = gt_boxes[:, 3] - gt_boxes[:, 1] + 1;
+  gt_heights = gt_boxes[:, 4] - gt_boxes[:, 2] + 1;
+  gt_ctr_x = gt_boxes[:, 1] .+ 0.5 .* (gt_widths - 1);
+  gt_ctr_y = gt_boxes[:, 2] .+ 0.5 .* (gt_heights - 1);
+
+  targets_dx = (gt_ctr_x - anc_ctr_x) ./ (anc_widths)
+      targets_dy = (gt_ctr_y - anc_ctr_y) ./ (anc_heights)
+      targets_dw = log(gt_widths ./ anc_widths)
+      targets_dh = log(gt_heights ./ anc_heights)
+
+    regression_label = hcat(targets_dx, targets_dy, targets_dw, targets_dh)
+
+end
+
+function outside_image(anchors)
+  outside = (anchors.<=0) | (anchors.>500)
+  out = outside[:,1] | outside[:,2] | outside[:,3] | outside[:,4]
+
+end
+
+function mymax(m,dim)
+  n = size(m,dim)
+  val = Array(Float64,n)
+  ind = Array(Int64,n)
+  for i = 1:n
+    if dim==1
+      (val[i],ind[i]) = findmax(m[i,:])
+    else
+      (val[i],ind[i]) = findmax(m[:,i])
     end
-    println(s.description)
-    isa(args, AbstractString) && (args=split(args))
-    o = parse_args(args, s; as_symbols=true)
-    println("opts=",[(k,v) for (k,v) in o]...)
+  end
+  return (val,ind)
+end
+
+function boxoverlap(anchors,gt_box)
+  iou = Array{Float64}(size(anchors,1),size(gt_box,1))
+  for i = 1:size(gt_box,1)
+    x1 = max(anchors[:,1],gt_box[i,1])
+    y1 = max(anchors[:,2],gt_box[i,2])
+    x2 = min(anchors[:,3],gt_box[i,3])
+    y2 = min(anchors[:,4],gt_box[i,4])
+
+    w = x2-x1+1
+    h = y2-y1+1
+    # Calculate intersection over union overlap
+    inter = w.*h
+    anc_area = (anchors[:,3]-anchors[:,1]+1) .* (anchors[:,4]-anchors[:,2]+1)
+    gt_area = (gt_box[i,3]-gt_box[i,1]+1) .* (gt_box[i,4]-gt_box[i,2]+1)
+
+    iou[:,i] =  inter./(anc_area.+gt_area-inter)
+    # clear non overlapping samples
+    iou[w.<0,i] =  0
+    iou[h.<0,i] =  0
+
+  end
+  # clear anchors outside image
+
+  iou[outside_image(anchors),:] = 0
+  return iou
+end
+
+function readlabel(label_number)
+  f = open(string(folder,"/dataset/train/annotations/",label_number))
+  s = readlines(f)
+  gt_label = Array{Int64}(length(s))
+  gt_box = Array{Float32}(length(s),4)
+  for i = 1:length(s)
+    s_array = split(s[i])
+    gt_label[i]=class[s_array[1]]
+    gt_box[i,:] = [parse(Float32,s_array[2]),parse(Float32,s_array[3]),parse(Float32,s_array[4]),parse(Float32,s_array[5])]
+  end
+  return (gt_label,gt_box)
+end
+
+
+function readim(im_number)
+  im = load(string(folder,"/dataset/train/images/",im_number))
+  im = convert(Array{Int64},raw(im))
+  if ndims(im)==2
+    tmp = zeros(3,size(im,1),size(im,2))
+    tmp[1,:,:] = im
+    tmp[2,:,:] = im
+    tmp[3,:,:] = im
+    im = tmp
+  end
+  im = permutedims(im,[2 3 1])
+  im = reshape(im,size(im,1),size(im,2),size(im,3),1)
+  return convert(atype,im)
+end
+
+function create_classes()
+  class = Dict{String,Int}()
+  class["aeroplane"] = 1
+  class["bicycle"] = 2
+  class["bird"] = 3
+  class["boat"] = 4
+  class["bottle"] = 5
+  class["bus"] = 6
+  class["car"] = 7
+  class["cat"] = 8
+  class["chair"] = 9
+  class["cow"] = 10
+  class["diningtable"] = 11
+  class["dog"] = 12
+  class["horse"] = 13
+  class["motorbike"] = 14
+  class["person"] = 15
+  class["pottedplant"] = 16
+  class["sheep"] = 17
+  class["sofa"] = 18
+  class["train"] = 19
+  class["tvmonitor"] = 20
+  return class
+end
+
+function weights_rpn()
+    w = Array(Any,16)
+    # ZFNET
+    w[1] = convert(atype,0.01.*randn(7,7,3,96))
+    w[2] = convert(atype,zeros(1,1,96,1))
+    w[3] = convert(atype,0.01.*randn(5,5,96,256))
+    w[4] = convert(atype,zeros(1,1,256,1))
+    w[5] = convert(atype,0.01.*randn(3,3,256,384))
+    w[6] = convert(atype,zeros(1,1,384,1))
+    w[7] = convert(atype,0.01.*randn(3,3,384,384))
+    w[8] = convert(atype,zeros(1,1,384,1))
+    w[9] = convert(atype,0.01.*randn(3,3,384,256))
+    w[10] = convert(atype,zeros(1,1,256,1))
+    # RPN
+    w[11] = convert(atype,0.01.*randn(3,3,256,256))
+    w[12] = convert(atype,zeros(1,1,256,1))
+    w[13] = convert(atype,0.01.*randn(1,1,256,9))
+    w[14] = convert(atype,zeros(1,1,9,1))
+    w[15] = convert(atype,0.01.*randn(1,1,256,36))
+    w[16] = convert(atype,zeros(1,1,36,1))
+
+    return w
+end
+
+function forward_rpn(w,x)
+
+    x = relu(conv4(w[1],x;padding=3,stride=2) .+ w[2])
+		x = pool(x;window=3,padding=1,stride=2)
+    x = relu(conv4(w[3],x;padding=2,stride=2) .+ w[4])
+    x = pool(x;window=3,padding=1,stride=2)
+    x = relu(conv4(w[5],x;padding=1,stride=1) .+ w[6])
+    x = relu(conv4(w[7],x;padding=1,stride=1) .+ w[8])
+    x = relu(conv4(w[9],x;padding=1,stride=1) .+ w[10])
+    x = relu(conv4(w[11],x;padding=1,stride=1) .+ w[12])
+    cls = conv4(w[13],x;padding=0,stride=1) .+ w[14]
+    bbox = conv4(w[15],x;padding=0,stride=1) .+ w[16]
+
+    return (cls,bbox)
+end
+
+lr = 0.1
+epochs = 10
+perc = 0.01
+global imsize = 500
+#global batchsize = 256
+#global fg_fraction = 0.5
+image_list = readdir("dataset/train/images")
+label_list = readdir("dataset/train/annotations")
+
 if gpu()>=0
-	atype = KnetArray{Float32}
+	global atype = KnetArray{Float32}
+  global folder = "/home/ec2-user/"
 else
-  atype = Array{Float32}
+  global atype = Array{Float32}
+  global folder = "/home/serkan/Documents/OKUL/COMP541/Project/PROJECT/"
 end
 
-
-imsize=224
-threshold = 0.5
-xtrn_folder = "dataset/VOC2007/VOC2007_train/JPEGImages224/"
-xtst_folder = "dataset/VOC2007/VOC2007_test/JPEGImages224/"
-ytrn_folder = "dataset/VOC2007/VOC2007_train/Annotations/txt/"
-ytst_folder = "dataset/VOC2007/VOC2007_test/Annotations/txt/"
-
-vocab,n = create_dictionary(ytrn_folder)
-
-if o[:samplesize]>0
-	n = o[:samplesize]
-end
-batch_count = ceil(Int,n/o[:bs])
-
-w = weights(atype)
-
-#prms = initprms(w)
-#report(epoch)=println(:epoch,epoch,:trn,accuracy(w,xtrn,threshold))#,:tst,accuracy(w,dtst)))
-#report(0)
-# Main part of our training process
-@time for epoch=1:o[:epochs]
-	@printf "\nRemaining batches: "
-	lss = Float32(0)
-	acc = Float32(0)
-
-	for batch=1:batch_count
-
-		@printf "%d " batch_count-batch
-		xtrn = create_x(xtrn_folder,imsize,batch,o[:bs],n,atype,epoch)
-		#xtst = create_x(xtst_folder,imsize,n)
-		ytrn = create_y(ytrn_folder,vocab,batch,o[:bs],n,atype,epoch)
-		#ytst = create_y(ytst_folder,vocab,n)
-		lss_init,acc_init = accuracy(w,xtrn,ytrn,o[:threshold])
-		#@printf "\nBatch loss: %f, Batch accuracy: %f" lss_init acc_init
-		train(w, xtrn,ytrn, o[:lr])
-		lssnew,accnew = accuracy(w,xtrn,ytrn,o[:threshold])
-		lss+=loss(w,xtrn,ytrn)
-		acc+=accnew
-		#println(:epoch ,epoch,:batch,batch,:trn,accuracy(w,xtrn,ytrn,threshold))
-	end
-	@printf "\nepoch: %d, loss: %f, accuracy: %f" epoch lss/batch_count acc/batch_count
-	@printf "\n"
-	if o[:gcheck] > 0
-      gradcheck(loss, w, first(dtrn)...; gcheck=o[:gcheck], verbose=true)
-	end
-
-		#report(epoch)
-end
-
-return w
-end
-
-if VERSION >= v"0.5.0-dev+7720"
-    PROGRAM_FILE == "rcnn.jl" && main(ARGS)
-else
-    !isinteractive() && !isdefined(Core.Main,:load_only) && main(ARGS)
+global class = create_classes()
+file = matopen("anchors.mat")
+#anchors = convert(atype,read(file,"a"))
+anchors = read(file,"a")
+# for loop here
+w = weights_rpn()
+for epoch = 1:epochs
+  lss = 0
+  for ind_im = 1:Int(round(length(label_list)*perc))
+    @printf "%d " round(length(label_list)*perc)-ind_im
+    #@printf "Processing image %d\n" ind_im
+    (gt_label,gt_box) = readlabel(label_list[ind_im])
+    (label_gold,bbox_gold) = prepare_roi(anchors,gt_box,gt_label)
+    im = readim(image_list[ind_im])
+    w=train(w,im,label_gold,bbox_gold,lr)
+    lss += loss(w,im,label_gold,bbox_gold)
+  end
+  lss = lss/Int(round(length(label_list)*perc))
+  @printf "\nepoch: %d, loss: %f\n" epoch lss
 end
