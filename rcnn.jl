@@ -1,5 +1,45 @@
 using Images, Knet, MAT, ImageMagick
 
+function inverse_bbox_transform(anchors,bbox_pred)
+  bbox_param_rs = reshape(bbox_pred,32*32*9,4)
+  anchors = convert(atype,anchors)
+  dx = bbox_param_rs[:,1]
+  dy = bbox_param_rs[:,2]
+  dw = bbox_param_rs[:,3]
+  dh = bbox_param_rs[:,4]
+
+  xctr_anc = anchors[:,1]
+  yctr_anc = anchors[:,2]
+  w_anc = anchors[:,3]
+  h_anc = anchors[:,4]
+
+  xctr_new = xctr_anc + dx.*w_anc
+  yctr_new = yctr_anc + dy.*h_anc
+  w_new = exp(dw).*w_anc
+  h_new = exp(dh).*h_anc
+
+  x1 = convert(Array{Int},round(xctr_new-(w_new/2)))
+  x2 = convert(Array{Int},round(xctr_new+(w_new/2)))
+  y1 = convert(Array{Int},round(yctr_new-(h_new/2)))
+  y2 = convert(Array{Int},round(yctr_new+(h_new/2)))
+  bbox_new_coor = [x1 y1 x2 y2]
+
+end
+
+function accuracy(w,im,label_gold,gt_box,anchors)
+  (a,bbox_pred_param) = forward_rpn(w,im)
+  bbox_pred_coor = inverse_bbox_transform(anchors,bbox_pred_param)
+  label_gold_vec = mat(label_gold)
+  bbox_pred_coor_conv = convert(Array{Float32},bbox_pred_coor)
+  label_gold_vec_conv = convert(Array{Float32},label_gold_vec)
+  bbox_select_coor_conv = bbox_pred_coor_conv[find(label_gold_vec_conv),:]
+  overlap = boxoverlap(bbox_select_coor_conv,gt_box)
+  max_overlap,a = mymax(overlap,1)
+  acc = sum(max_overlap)
+  return acc
+end
+
+
 function loss(w,im,label_gold,bbox_gold)
     lambda = 4
     (label_pred,bbox_pred) = forward_rpn(w,im)
@@ -72,7 +112,7 @@ function prepare_roi(anchors,gt_box,gt_label)
   #bg_inds = intersect(bg_inds,find(!outside_image(anchors)))
   target_box = gt_box[anc_assignment[fg_inds], :]
   anc_box = anchors[fg_inds, :]
-  regression_label = rcnn_bbox_transform(anc_box, target_box);
+  regression_label = bbox_transform(anc_box, target_box);
   bbox_targets = zeros(size(anchors, 1), 4);
   labels = zeros(size(anchors, 1))
   #labels[fg_inds] = gt_label[anc_assignment[fg_inds]]
@@ -87,7 +127,7 @@ function prepare_roi(anchors,gt_box,gt_label)
 
 end
 
-function rcnn_bbox_transform(anc_boxes,gt_boxes)
+function bbox_transform(anc_boxes,gt_boxes)
   anc_widths = anc_boxes[:, 3] - anc_boxes[:, 1] + 1;
   anc_heights = anc_boxes[:, 4] - anc_boxes[:, 2] + 1;
   anc_ctr_x = anc_boxes[:, 1] .+ 0.5 .* (anc_widths - 1);
@@ -249,7 +289,7 @@ function forward_rpn(w,x)
 end
 
 
-epochs = 50
+epochs = 100
 perc = 0.01 # percentage of the data to use
 global imsize = 500
 #global batchsize = 256
@@ -279,15 +319,24 @@ for epoch = 1:epochs
   end
 
   lss = 0
+  acc = 0
   for ind_im = 1:Int(round(length(label_list)*perc))
-    @printf "%d " round(length(label_list)*perc)-ind_im
+    #@printf "%d " round(length(label_list)*perc)-ind_im
     #@printf "Processing image %d\n" ind_im
     (gt_label,gt_box) = readlabel(label_list[ind_im])
     (label_gold,bbox_gold) = prepare_roi(anchors,gt_box,gt_label)
     im = readim(image_list[ind_im])
     w=train(w,im,label_gold,bbox_gold,lr)
     lss += loss(w,im,label_gold,bbox_gold)
+    acc += accuracy(w,im,label_gold,gt_box,anchors)
+
   end
   lss = lss/Int(round(length(label_list)*perc))
-  @printf "\nepoch: %d, loss: %f\n" epoch lss
+  acc = acc/Int(round(length(label_list)*perc))
+  @printf "\nepoch: %d, loss: %f, acc: %f\n" epoch lss acc
 end
+#
+# ind_im = 1
+# (gt_label,gt_box) = readlabel(label_list[ind_im])
+# im = readim(image_list[ind_im])
+# (label_pred,bbox_pred) = forward_rpn(w,im)
